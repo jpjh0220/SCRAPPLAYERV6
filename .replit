@@ -1,0 +1,113 @@
+modules = ["nodejs-20", "web", "python-3.11", "postgresql-16"]
+run = "npm run dev"
+hidden = [".config", ".git", "generated-icon.png", "node_modules", "dist"]
+
+[nix]
+channel = "stable-24_05"
+packages = ["deno", "ffmpeg", "python3", "unzip"]
+
+[deployment]
+deploymentTarget = "autoscale"
+build = ["npm", "run", "build"]
+run = ["npm", "run", "start"]
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[[ports]]
+localPort = 5001
+externalPort = 3001
+
+[[ports]]
+localPort = 33727
+externalPort = 8000
+
+[[ports]]
+localPort = 34585
+externalPort = 8081
+
+[[ports]]
+localPort = 36915
+externalPort = 6800
+
+[[ports]]
+localPort = 38043
+externalPort = 8099
+
+[[ports]]
+localPort = 39809
+externalPort = 6000
+
+[[ports]]
+localPort = 40011
+externalPort = 3002
+
+[[ports]]
+localPort = 40817
+externalPort = 9000
+
+[[ports]]
+localPort = 40843
+externalPort = 8080
+
+[[ports]]
+localPort = 42347
+externalPort = 3003
+
+[[ports]]
+localPort = 43393
+externalPort = 4200
+
+[[ports]]
+localPort = 43573
+externalPort = 5000
+
+[[ports]]
+localPort = 43621
+externalPort = 5173
+
+[[ports]]
+localPort = 45203
+externalPort = 8008
+
+[[ports]]
+localPort = 46127
+externalPort = 3000
+
+[env]
+PORT = "5000"
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start application"
+
+[[workflows.workflow]]
+name = "Start application"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "npm run dev"
+waitForPort = 5000
+
+[agent]
+mockupState = "FULLSTACK"
+integrations = ["javascript_object_storage:1.0.0"]
+
+[objectStorage]
+defaultBucketID = "replit-objstore-96c59f00-943d-48d0-bb3c-f4a3fcda8c75"
+
+[userenv]
+
+[userenv.shared]
+PUBLIC_OBJECT_SEARCH_PATHS = "/replit-objstore-96c59f00-943d-48d0-bb3c-f4a3fcda8c75/public"
+PRIVATE_OBJECT_DIR = "/replit-objstore-96c59f00-943d-48d0-bb3c-f4a3fcda8c75/.private"

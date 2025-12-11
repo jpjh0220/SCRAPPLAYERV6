@@ -25,8 +25,8 @@ export function rateLimit(config: RateLimitConfig) {
     message = "Too many requests, please try again later",
     keyGenerator = (req) => {
       // Use user ID if authenticated, otherwise IP
-      const user = (req as any).user;
-      return user?.claims?.sub || req.ip || "unknown";
+      const session = (req as any).session;
+      return session?.userId?.toString() || req.ip || "unknown";
     },
   } = config;
 

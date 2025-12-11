@@ -1,10 +1,16 @@
 import express, { type Request, Response, NextFunction } from "express";
+import session from "express-session";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { initializeWebSocket } from "./utils/websocket";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler";
 import { securityHeaders, requestLogger } from "./middleware/security";
+import { initializeAuthDatabase } from "./auth/database";
+import { LocalAuthService, attachUser } from "./auth/localAuth";
+import { AccountCleanupJob } from "./auth/cleanupJob";
+import ConnectSqlite3 from "connect-sqlite3";
+import crypto from "crypto";
 
 const app = express();
 const httpServer = createServer(app);
@@ -74,11 +80,58 @@ app.use((req, res, next) => {
   try {
     log("Starting server initialization...", "startup");
 
+    // Initialize authentication database
+    log("Initializing authentication database...", "startup");
+    const authDb = initializeAuthDatabase();
+    const authService = new LocalAuthService(authDb);
+    log("Authentication database ready", "startup");
+
+    // Initialize session store
+    const SqliteStore = ConnectSqlite3(session);
+    const sessionSecret = process.env.SESSION_SECRET || crypto.randomBytes(32).toString("hex");
+
+    if (!process.env.SESSION_SECRET) {
+      log("⚠️  WARNING: SESSION_SECRET not set! Using random secret (sessions will not persist across restarts)", "startup");
+      log("⚠️  Set SESSION_SECRET in .env for production!", "startup");
+    }
+
+    const sessionConfig: session.SessionOptions = {
+      store: new SqliteStore({
+        db: "auth.db",
+        dir: "./data",
+        table: "sessions",
+      }),
+      secret: sessionSecret,
+      resave: false,
+      saveUninitialized: false,
+      rolling: true, // Refresh session on each request
+      name: "connect.sid",
+      cookie: {
+        maxAge: 86400000, // 24 hours
+        httpOnly: true,
+        secure: false, // Must be false for HTTP in development
+        sameSite: "lax",
+        path: "/",
+      },
+    };
+
+    app.use(session(sessionConfig));
+    log("Session middleware configured", "startup");
+
+    // Attach user to request
+    app.use(attachUser(authService));
+
     // Initialize WebSocket for real-time features
     const wsManager = initializeWebSocket(httpServer);
     log(`WebSocket server initialized at ws://localhost:${process.env.PORT || 5000}/ws`, "startup");
 
-    await registerRoutes(httpServer, app);
+    // Start account cleanup job
+    const cleanupJob = new AccountCleanupJob(authService);
+    const cleanupHour = parseInt(process.env.CLEANUP_HOUR || "3");
+    cleanupJob.start(cleanupHour);
+    log(`Account cleanup job scheduled (runs daily at ${cleanupHour}:00)`, "startup");
+
+    await registerRoutes(httpServer, app, authService);
     log("Routes registered", "startup");
 
     // 404 handler for unmatched routes

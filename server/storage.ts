@@ -700,7 +700,7 @@ export class DatabaseStorage implements IStorage {
       return sharedTracks;
     }
     
-    const userChannels = [...new Set(userTracks.map(t => t.channel.toLowerCase()))];
+    const userChannels = Array.from(new Set(userTracks.map(t => t.channel.toLowerCase())));
     const userVideoIds = new Set(userTracks.map(t => t.videoId));
     
     const allShared = await db.select().from(tracks)

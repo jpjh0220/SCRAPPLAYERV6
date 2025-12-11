@@ -5,9 +5,7 @@ import { spawn } from "child_process";
 import path from "path";
 import fs from "fs";
 import { insertTrackSchema, updateUsernameSchema } from "@shared/schema";
-import { requireAuth } from "./auth/localAuth";
-import type { LocalAuthService } from "./auth/localAuth";
-import { createAuthRoutes } from "./routes/auth.routes";
+import { setupAuth, isAuthenticated } from "./replitAuth";
 import { audioStorage, mediaStorage } from "./objectStorage";
 
 const MUSIC_DIR = path.join(process.cwd(), "music");
@@ -90,13 +88,9 @@ async function getStreamUrl(videoId: string): Promise<string | null> {
 
 export async function registerRoutes(
   httpServer: Server,
-  app: Express,
-  authService: LocalAuthService
+  app: Express
 ): Promise<Server> {
-
-  // Register authentication routes
-  app.use("/api/auth", createAuthRoutes(authService));
-
+  
   // Health check endpoint (before auth to ensure it always works)
   app.get("/api/health", (_req, res) => {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
@@ -424,7 +418,40 @@ export async function registerRoutes(
     }
   });
 
-  // REMOVED: setupAuth and /api/auth/user (replaced by local auth in /api/auth/*)
+  // Setup authentication
+  await setupAuth(app);
+
+  // GET /api/auth/user - Get current user
+  app.get('/api/auth/user', async (req: any, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+    const claims = req.user?.claims;
+    if (!claims) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+    
+    // Try to get the user's profile avatar (user-uploaded) first, 
+    // then fall back to OIDC claims
+    let profileImageUrl = claims.picture || claims.profile_image_url || null;
+    
+    try {
+      const profile = await storage.getProfile(claims.sub);
+      if (profile?.avatarUrl) {
+        profileImageUrl = profile.avatarUrl;
+      }
+    } catch (e) {
+      // Profile might not exist yet, that's okay
+    }
+    
+    res.json({
+      id: claims.sub,
+      email: claims.email,
+      firstName: claims.first_name || claims.given_name,
+      lastName: claims.last_name || claims.family_name,
+      profileImageUrl,
+    });
+  });
 
   // GET /api/tracks - List all tracks (legacy, returns all for backward compat)
   app.get("/api/tracks", async (req, res) => {
@@ -440,10 +467,10 @@ export async function registerRoutes(
   // GET /api/tracks/mine - Get current user's personal tracks
   app.get("/api/tracks/mine", async (req: any, res) => {
     try {
-      if (!req.session?.userId) {
+      if (!req.isAuthenticated()) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       if (!userId) {
         return res.status(401).json({ error: "User ID not found" });
       }
@@ -488,7 +515,7 @@ export async function registerRoutes(
   app.post("/api/download", async (req: any, res) => {
     try {
       // Require authentication for downloads
-      if (!req.session?.userId) {
+      if (!req.isAuthenticated()) {
         return res.status(401).json({ error: "Please sign in to download music" });
       }
 
@@ -504,7 +531,7 @@ export async function registerRoutes(
       }
 
       // Get current user ID (required)
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       if (!userId) {
         return res.status(401).json({ error: "User ID not found" });
       }
@@ -740,7 +767,7 @@ export async function registerRoutes(
       }
 
       // Check ownership - only owner or admin can delete
-      const userId = req.session?.userId || null;
+      const userId = req.isAuthenticated() ? req.user?.claims?.sub : null;
       if (track.userId && track.userId !== userId) {
         return res.status(403).json({ error: "You don't have permission to delete this track" });
       }
@@ -774,11 +801,11 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Invalid track ID" });
       }
 
-      if (!req.session?.userId) {
+      if (!req.isAuthenticated()) {
         return res.status(401).json({ error: "Unauthorized" });
       }
 
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       const track = await storage.getTrackById(id);
       
       if (!track) {
@@ -825,11 +852,11 @@ export async function registerRoutes(
       }
 
       // Require authentication
-      if (!req.session?.userId) {
+      if (!req.isAuthenticated()) {
         return res.status(401).json({ error: "Please sign in to add tracks to your library" });
       }
 
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       if (!userId) {
         return res.status(401).json({ error: "User ID not found" });
       }
@@ -987,7 +1014,7 @@ export async function registerRoutes(
   // ============================================
 
   // POST /api/upload - Upload media file (photo/video)
-  app.post("/api/upload", requireAuth, async (req: any, res) => {
+  app.post("/api/upload", isAuthenticated, async (req: any, res) => {
     try {
       const contentType = req.headers['content-type'] || '';
       
@@ -1082,9 +1109,9 @@ export async function registerRoutes(
   // ============================================
 
   // GET /api/profile/me - Get current user's profile
-  app.get("/api/profile/me", requireAuth, async (req: any, res) => {
+  app.get("/api/profile/me", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
@@ -1109,9 +1136,9 @@ export async function registerRoutes(
   });
 
   // PATCH /api/profile/me - Update current user's profile
-  app.patch("/api/profile/me", requireAuth, async (req: any, res) => {
+  app.patch("/api/profile/me", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
@@ -1133,10 +1160,10 @@ export async function registerRoutes(
   });
 
   // GET /api/username/check - Check username availability
-  app.get("/api/username/check", requireAuth, async (req: any, res) => {
+  app.get("/api/username/check", isAuthenticated, async (req: any, res) => {
     try {
       const username = (req.query.username as string)?.toLowerCase();
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       
       if (!username) {
         return res.status(400).json({ error: "Username required" });
@@ -1159,9 +1186,9 @@ export async function registerRoutes(
   });
 
   // PUT /api/username - Update current user's username
-  app.put("/api/username", requireAuth, async (req: any, res) => {
+  app.put("/api/username", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
@@ -1198,7 +1225,7 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Profile not found" });
       }
 
-      const currentUserId = req.session?.userId || null;
+      const currentUserId = req.isAuthenticated?.() ? req.user?.claims?.sub : null;
       const isFollowing = currentUserId ? await storage.isFollowing(currentUserId, userId) : false;
 
       res.json({ ...profile, isFollowing });
@@ -1224,9 +1251,9 @@ export async function registerRoutes(
   });
 
   // POST /api/users/:userId/follow - Follow a user
-  app.post("/api/users/:userId/follow", requireAuth, async (req: any, res) => {
+  app.post("/api/users/:userId/follow", isAuthenticated, async (req: any, res) => {
     try {
-      const followerId = req.session.userId!;
+      const followerId = req.user?.claims?.sub;
       const { userId: followingId } = req.params;
 
       if (!followerId) {
@@ -1266,9 +1293,9 @@ export async function registerRoutes(
   });
 
   // DELETE /api/users/:userId/follow - Unfollow a user
-  app.delete("/api/users/:userId/follow", requireAuth, async (req: any, res) => {
+  app.delete("/api/users/:userId/follow", isAuthenticated, async (req: any, res) => {
     try {
-      const followerId = req.session.userId!;
+      const followerId = req.user?.claims?.sub;
       const { userId: followingId } = req.params;
 
       if (!followerId) {
@@ -1308,9 +1335,9 @@ export async function registerRoutes(
   });
 
   // GET /api/feed - Get current user's feed
-  app.get("/api/feed", requireAuth, async (req: any, res) => {
+  app.get("/api/feed", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
@@ -1352,9 +1379,9 @@ export async function registerRoutes(
   });
 
   // POST /api/posts - Create a new post
-  app.post("/api/posts", requireAuth, async (req: any, res) => {
+  app.post("/api/posts", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
@@ -1395,7 +1422,7 @@ export async function registerRoutes(
       }
 
       const profile = await storage.getProfile(post.authorId);
-      const currentUserId = req.session?.userId || null;
+      const currentUserId = req.isAuthenticated?.() ? req.user?.claims?.sub : null;
       const userReaction = currentUserId ? await storage.getReaction(postId, currentUserId) : null;
 
       res.json({ ...post, author: profile, userReaction: userReaction?.type || null });
@@ -1412,7 +1439,7 @@ export async function registerRoutes(
       const posts = await storage.getUserPosts(userId);
       
       const profile = await storage.getProfile(userId);
-      const currentUserId = req.session?.userId || null;
+      const currentUserId = req.isAuthenticated?.() ? req.user?.claims?.sub : null;
 
       const postsWithData = await Promise.all(
         posts.map(async (post) => {
@@ -1429,9 +1456,9 @@ export async function registerRoutes(
   });
 
   // DELETE /api/posts/:postId - Delete a post
-  app.delete("/api/posts/:postId", requireAuth, async (req: any, res) => {
+  app.delete("/api/posts/:postId", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       const postId = parseInt(req.params.postId);
 
       if (isNaN(postId)) {
@@ -1456,9 +1483,9 @@ export async function registerRoutes(
   });
 
   // POST /api/posts/:postId/reactions - Add/update reaction
-  app.post("/api/posts/:postId/reactions", requireAuth, async (req: any, res) => {
+  app.post("/api/posts/:postId/reactions", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       const postId = parseInt(req.params.postId);
       const { type } = req.body;
 
@@ -1503,9 +1530,9 @@ export async function registerRoutes(
   });
 
   // DELETE /api/posts/:postId/reactions - Remove reaction
-  app.delete("/api/posts/:postId/reactions", requireAuth, async (req: any, res) => {
+  app.delete("/api/posts/:postId/reactions", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       const postId = parseInt(req.params.postId);
 
       if (!userId) {
@@ -1551,9 +1578,9 @@ export async function registerRoutes(
   });
 
   // POST /api/posts/:postId/comments - Add a comment
-  app.post("/api/posts/:postId/comments", requireAuth, async (req: any, res) => {
+  app.post("/api/posts/:postId/comments", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       const postId = parseInt(req.params.postId);
       const { content, parentId } = req.body;
 
@@ -1585,9 +1612,9 @@ export async function registerRoutes(
   });
 
   // DELETE /api/comments/:commentId - Delete a comment
-  app.delete("/api/comments/:commentId", requireAuth, async (req: any, res) => {
+  app.delete("/api/comments/:commentId", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       const commentId = parseInt(req.params.commentId);
 
       if (isNaN(commentId)) {
@@ -1603,9 +1630,9 @@ export async function registerRoutes(
   });
 
   // POST /api/posts/:postId/share - Share a post (creates a new post in user's feed)
-  app.post("/api/posts/:postId/share", requireAuth, async (req: any, res) => {
+  app.post("/api/posts/:postId/share", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       const postId = parseInt(req.params.postId);
       const { comment } = req.body;
 
@@ -1656,9 +1683,9 @@ export async function registerRoutes(
   // ============ PLAYLIST ROUTES ============
 
   // GET /api/playlists - Get user's playlists
-  app.get("/api/playlists", requireAuth, async (req: any, res) => {
+  app.get("/api/playlists", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
       const userPlaylists = await storage.getUserPlaylists(userId);
@@ -1670,9 +1697,9 @@ export async function registerRoutes(
   });
 
   // POST /api/playlists - Create a new playlist
-  app.post("/api/playlists", requireAuth, async (req: any, res) => {
+  app.post("/api/playlists", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
       const { name, description, isPublic } = req.body;
@@ -1711,9 +1738,9 @@ export async function registerRoutes(
   });
 
   // PUT /api/playlists/:id - Update a playlist
-  app.put("/api/playlists/:id", requireAuth, async (req: any, res) => {
+  app.put("/api/playlists/:id", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
       const playlistId = parseInt(req.params.id);
@@ -1738,9 +1765,9 @@ export async function registerRoutes(
   });
 
   // DELETE /api/playlists/:id - Delete a playlist
-  app.delete("/api/playlists/:id", requireAuth, async (req: any, res) => {
+  app.delete("/api/playlists/:id", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
       const playlistId = parseInt(req.params.id);
@@ -1773,9 +1800,9 @@ export async function registerRoutes(
   });
 
   // POST /api/playlists/:id/tracks - Add a track to a playlist
-  app.post("/api/playlists/:id/tracks", requireAuth, async (req: any, res) => {
+  app.post("/api/playlists/:id/tracks", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
       const playlistId = parseInt(req.params.id);
@@ -1797,9 +1824,9 @@ export async function registerRoutes(
   });
 
   // DELETE /api/playlists/:id/tracks/:trackId - Remove a track from a playlist
-  app.delete("/api/playlists/:id/tracks/:trackId", requireAuth, async (req: any, res) => {
+  app.delete("/api/playlists/:id/tracks/:trackId", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
       const playlistId = parseInt(req.params.id);
@@ -1821,9 +1848,9 @@ export async function registerRoutes(
   // ============ NOTIFICATION ROUTES ============
 
   // GET /api/notifications - Get user's notifications
-  app.get("/api/notifications", requireAuth, async (req: any, res) => {
+  app.get("/api/notifications", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
       const userNotifications = await storage.getUserNotifications(userId);
@@ -1835,9 +1862,9 @@ export async function registerRoutes(
   });
 
   // GET /api/notifications/unread-count - Get unread notification count
-  app.get("/api/notifications/unread-count", requireAuth, async (req: any, res) => {
+  app.get("/api/notifications/unread-count", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
       const count = await storage.getUnreadNotificationCount(userId);
@@ -1849,7 +1876,7 @@ export async function registerRoutes(
   });
 
   // PUT /api/notifications/:id/read - Mark a notification as read
-  app.put("/api/notifications/:id/read", requireAuth, async (req: any, res) => {
+  app.put("/api/notifications/:id/read", isAuthenticated, async (req: any, res) => {
     try {
       const notificationId = parseInt(req.params.id);
       if (isNaN(notificationId)) return res.status(400).json({ error: "Invalid notification ID" });
@@ -1863,9 +1890,9 @@ export async function registerRoutes(
   });
 
   // PUT /api/notifications/read-all - Mark all notifications as read
-  app.put("/api/notifications/read-all", requireAuth, async (req: any, res) => {
+  app.put("/api/notifications/read-all", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
       await storage.markAllNotificationsRead(userId);
@@ -1881,7 +1908,7 @@ export async function registerRoutes(
   // GET /api/recommendations - Get personalized music recommendations
   app.get("/api/recommendations", async (req: any, res) => {
     try {
-      const userId = req.session?.userId || null;
+      const userId = req.isAuthenticated() ? req.user?.claims?.sub : null;
       const limit = parseInt(req.query.limit as string) || 20;
       
       if (userId) {
@@ -1904,7 +1931,7 @@ export async function registerRoutes(
   app.get("/api/trending", async (req: any, res) => {
     try {
       const limit = parseInt(req.query.limit as string) || 20;
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       const trending = await storage.getTrendingTracks(limit, userId);
       res.json(trending.map(item => ({
         ...item.track,
@@ -1921,7 +1948,7 @@ export async function registerRoutes(
   app.get("/api/trending/charts", async (req: any, res) => {
     try {
       const limit = parseInt(req.query.limit as string) || 5;
-      const userId = req.session.userId!;
+      const userId = req.user?.claims?.sub;
       const charts = await storage.getTrendingByChannel(limit, userId);
       res.json(charts);
     } catch (error) {
@@ -2057,7 +2084,7 @@ export async function registerRoutes(
       }
 
       const limit = parseInt(req.query.limit as string) || 12;
-      const userId = req.session?.userId || null;
+      const userId = req.isAuthenticated() ? req.user?.claims?.sub : null;
 
       let searchTerms: string[] = [];
       let existingVideoIds: Set<string> = new Set();

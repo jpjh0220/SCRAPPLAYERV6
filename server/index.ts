@@ -2,6 +2,9 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
+import { initializeWebSocket } from "./utils/websocket";
+import { errorHandler, notFoundHandler } from "./middleware/errorHandler";
+import { securityHeaders, requestLogger } from "./middleware/security";
 
 const app = express();
 const httpServer = createServer(app);
@@ -12,15 +15,23 @@ declare module "http" {
   }
 }
 
+// Security headers middleware (apply early)
+app.use(securityHeaders);
+
+// Request logging middleware
+app.use(requestLogger);
+
+// Body parsing middleware
 app.use(
   express.json({
+    limit: "10mb",
     verify: (req, _res, buf) => {
       req.rawBody = buf;
     },
   }),
 );
 
-app.use(express.urlencoded({ extended: false }));
+app.use(express.urlencoded({ extended: false, limit: "10mb" }));
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
@@ -62,16 +73,19 @@ app.use((req, res, next) => {
 (async () => {
   try {
     log("Starting server initialization...", "startup");
-    
+
+    // Initialize WebSocket for real-time features
+    const wsManager = initializeWebSocket(httpServer);
+    log(`WebSocket server initialized at ws://localhost:${process.env.PORT || 5000}/ws`, "startup");
+
     await registerRoutes(httpServer, app);
     log("Routes registered", "startup");
 
-    app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
-      const status = err.status || err.statusCode || 500;
-      const message = err.message || "Internal Server Error";
-      log(`Error: ${message}`, "error");
-      res.status(status).json({ message });
-    });
+    // 404 handler for unmatched routes
+    app.use(notFoundHandler);
+
+    // Global error handler (must be last)
+    app.use(errorHandler);
 
     // importantly only setup vite in development and after
     // setting up all the other routes so the catch-all route
